@@ -59,13 +59,13 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
     private double _playbackSpeed = 1.0d;
 
     // Preset playback speeds cycled through by the speed button and the +/- hotkeys.
-    private static readonly double[] SpeedPresets = [0.25d, 0.5d, 0.75d, 1.0d, 1.25d, 1.5d, 1.75d, 2.0d];
+    private static readonly double[] SpeedPresets = [0.25d, 0.5d, 0.75d, 1.0d, 1.5d, 2.0d, 3.0d, 4.0d];
 
     // Seek step sizes (in 100ns ticks, same unit as MediaPosition/MediaDuration) used by the
     // timeline hotkeys: Shift+Left/Right for a short seek, Ctrl+Left/Right for a long seek.
     // Plain arrow keys are intentionally left untouched: QuickLook's global hotkey dispatcher
     // already uses them to switch between files in Explorer.
-    private static readonly long ShortSeekTicks = TimeSpan.FromSeconds(5).Ticks;
+    private static readonly long ShortSeekTicks = TimeSpan.FromSeconds(10).Ticks;
     private static readonly long LongSeekTicks = TimeSpan.FromSeconds(30).Ticks;
 
     public ViewerPanel(ContextObject context)
@@ -312,11 +312,12 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
                 break;
 
             case Key.End when modifiers == ModifierKeys.None:
-                SeekTo(mediaElement.MediaDuration);
+                SeekTo(Math.Max(0L, mediaElement.MediaDuration - TimeSpan.FromMilliseconds(100).Ticks));
                 e.Handled = true;
                 break;
 
-            case Key.OemPlus or Key.Add when modifiers == ModifierKeys.None:
+            case Key.OemPlus when modifiers == ModifierKeys.None || modifiers == ModifierKeys.Shift:
+            case Key.Add when modifiers == ModifierKeys.None:
                 CycleSpeed(1);
                 e.Handled = true;
                 break;
@@ -430,15 +431,17 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
     private void AutoHideViedoControlContainer(object sender, EventArgs e)
     {
-        if (!HasVideo)
-            return;
+        videoControlContainer.Opacity = 1;
 
-        if (videoControlContainer.IsMouseOver)
-            return;
+        //if (!HasVideo)
+        //    return;
 
-        var hide = (Storyboard)videoControlContainer.FindResource("HideControlStoryboard");
+        //if (videoControlContainer.IsMouseOver)
+        //    return;
 
-        hide.Begin();
+        //var hide = (Storyboard)videoControlContainer.FindResource("HideControlStoryboard");
+
+        //hide.Begin();
     }
 
     private void PlayerStateChanged(PlayerState oldState, PlayerState newState)

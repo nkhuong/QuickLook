@@ -107,7 +107,13 @@ public sealed class Plugin : IViewer
 
             context.SetPreferredSizeFit(windowSize, 0.8);
 
-            context.TitlebarAutoHide = true;
+            // Open preview at 75% of the calculated size
+            context.PreferredSize = new Size(
+                context.PreferredSize.Width * 0.75,
+                context.PreferredSize.Height * 0.75
+            );
+
+            context.TitlebarAutoHide = false;
             context.Theme = Themes.Dark;
             context.TitlebarBlurVisibility = true;
         }
@@ -121,7 +127,7 @@ public sealed class Plugin : IViewer
             context.TitlebarColourVisibility = false;
         }
 
-        context.TitlebarOverlap = true;
+        context.TitlebarOverlap = false;
     }
 
     public void View(string path, ContextObject context)

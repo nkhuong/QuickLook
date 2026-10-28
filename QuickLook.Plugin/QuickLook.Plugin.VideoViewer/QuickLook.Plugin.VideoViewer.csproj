@@ -227,4 +227,11 @@
         </Compile>
     </ItemGroup>
 
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+		<OutputPath>..\..\Build\Release\QuickLook.Plugin\QuickLook.Plugin.VideoViewer\</OutputPath>
+		<PlatformTarget>AnyCPU</PlatformTarget>
+		<Optimize>true</Optimize>
+	</PropertyGroup>
+
 </Project>
