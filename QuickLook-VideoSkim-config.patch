@@ -1,0 +1,54 @@
+diff --git a/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/Plugin.cs b/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/Plugin.cs
+--- a/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/Plugin.cs
++++ b/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/Plugin.cs
+@@ -18,3 +18,4 @@
++using QuickLook.Common.Helpers;
+ using QuickLook.Common.Plugin;
+ using QuickLook.MediaInfo;
+ using QuickLook.MediaInfo.Core;
+@@ -108,9 +109,8 @@
+-            context.SetPreferredSizeFit(windowSize, 0.8);
+-
+-            // Open preview at 75% of the calculated size
+-            context.PreferredSize = new Size(
+-                context.PreferredSize.Width * 0.75,
+-                context.PreferredSize.Height * 0.75
+-            );
++            // Scale from the video's original dimensions, then fit within 80% of the screen.
++            int sizePercent = SettingHelper.Get("VideoSizePercent", 80, "QuickLook.Plugin.VideoViewer");
++            double scale = Math.Max(10, Math.Min(100, sizePercent)) / 100.0;
++            context.SetPreferredSizeFit(new Size(
++                windowSize.Width * scale,
++                windowSize.Height * scale), 0.8);
+ 
+             context.TitlebarAutoHide = false;
+diff --git a/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/ViewerPanel.xaml.cs b/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/ViewerPanel.xaml.cs
+--- a/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/ViewerPanel.xaml.cs
++++ b/QuickLook.Plugin/QuickLook.Plugin.VideoViewer/ViewerPanel.xaml.cs
+@@ -58,4 +58,5 @@
+     private bool _useHardwareAcceleration;
+     private double _playbackSpeed = 1.0d;
++    private bool _initialVideoSeekApplied;
+ 
+     // Preset playback speeds cycled through by the speed button and the +/- hotkeys.
+@@ -385,6 +386,20 @@
+ 
+         HasVideo = mediaElement.HasVideo;
+ 
++        // Apply once per video; reopening the decoder (S/W vs H/W) must not rewind it.
++        if (HasVideo && !_initialVideoSeekApplied)
++        {
++            _initialVideoSeekApplied = true;
++            int startSeconds = Math.Max(0,
++                SettingHelper.Get("StartAtSeconds", 10, "QuickLook.Plugin.VideoViewer"));
++            long startTicks = TimeSpan.FromSeconds(startSeconds).Ticks;
++            long durationTicks = mediaElement.MediaDuration;
++
++            // Short clips (or an unknown duration) start normally at 0 seconds.
++            if (startTicks > 0 && durationTicks > startTicks)
++                mediaElement.MediaPosition = startTicks;
++        }
++
+         _context.IsBusy = false;
+     }
+ 

@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+using QuickLook.Common.Helpers;
 using QuickLook.Common.Plugin;
 using QuickLook.MediaInfo;
 using QuickLook.MediaInfo.Core;
@@ -105,13 +106,12 @@ public sealed class Plugin : IViewer
             if (rotation % 180 != 0)
                 windowSize = new Size(windowSize.Height, windowSize.Width);
 
-            context.SetPreferredSizeFit(windowSize, 0.8);
-
-            // Open preview at 75% of the calculated size
-            context.PreferredSize = new Size(
-                context.PreferredSize.Width * 0.75,
-                context.PreferredSize.Height * 0.75
-            );
+            // Scale from the video's original dimensions, then fit within 80% of the screen.
+            int sizePercent = SettingHelper.Get("VideoSizePercent", 80, "QuickLook.Plugin.VideoViewer");
+            double scale = Math.Max(10, Math.Min(100, sizePercent)) / 100.0;
+            context.SetPreferredSizeFit(new Size(
+                windowSize.Width * scale,
+                windowSize.Height * scale), 0.8);
 
             context.TitlebarAutoHide = false;
             context.Theme = Themes.Dark;

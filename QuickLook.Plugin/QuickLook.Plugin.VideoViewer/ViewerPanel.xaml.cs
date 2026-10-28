@@ -57,6 +57,7 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
     private bool _shouldLoop;
     private bool _useHardwareAcceleration;
     private double _playbackSpeed = 1.0d;
+    private bool _initialVideoSeekApplied;
 
     // Preset playback speeds cycled through by the speed button and the +/- hotkeys.
     private static readonly double[] SpeedPresets = [0.25d, 0.5d, 0.75d, 1.0d, 1.5d, 2.0d, 3.0d, 4.0d];
@@ -384,6 +385,20 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
             return;
 
         HasVideo = mediaElement.HasVideo;
+
+        // Apply once per video; reopening the decoder (S/W vs H/W) must not rewind it.
+        if (HasVideo && !_initialVideoSeekApplied)
+        {
+            _initialVideoSeekApplied = true;
+            int startSeconds = Math.Max(0,
+                SettingHelper.Get("StartAtSeconds", 10, "QuickLook.Plugin.VideoViewer"));
+            long startTicks = TimeSpan.FromSeconds(startSeconds).Ticks;
+            long durationTicks = mediaElement.MediaDuration;
+
+            // Short clips (or an unknown duration) start normally at 0 seconds.
+            if (startTicks > 0 && durationTicks > startTicks)
+                mediaElement.MediaPosition = startTicks;
+        }
 
         _context.IsBusy = false;
     }
