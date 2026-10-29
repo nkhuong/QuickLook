@@ -58,6 +58,10 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
     private bool _useHardwareAcceleration;
     private double _playbackSpeed = 1.0d;
     private bool _initialVideoSeekApplied;
+    private DispatcherTimer _startupSeekTimer;
+    private int _startupSeekTicks;
+    private long _startupSeekTarget;
+    private bool _startupSeekAttempted;
 
     // Preset playback speeds cycled through by the speed button and the +/- hotkeys.
     private static readonly double[] SpeedPresets = [0.25d, 0.5d, 0.75d, 1.0d, 1.5d, 2.0d, 3.0d, 4.0d];
@@ -104,16 +108,37 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
         buttonMute.ToolTip = TranslationHelper.Get("BTN_Volume", translationFile, failsafe: "Volume");
         buttonTime.ToolTip = TranslationHelper.Get("BTN_Time", translationFile, failsafe: "Time Elapsed/Remaining");
 
+        buttonTime.Tag = SettingHelper.Get(
+            "TimeDisplayMode", "Time", "QuickLook.Plugin.VideoViewer"
+        ) == "Length" ? "Length" : "Time";
+
+
         buttonPlayPause.Click += TogglePlayPause;
         buttonLoop.Click += ToggleShouldLoop;
         buttonHardwareAcceleration.Click += ToggleHardwareAcceleration;
         buttonSpeed.Click += (_, _) => CycleSpeed(1);
+        buttonSettings.Click += ShowVideoSettings;
         buttonSpeed.MouseRightButtonUp += (_, e) =>
         {
             PlaybackSpeed = 1.0d;
             e.Handled = true;
         };
-        buttonTime.Click += (_, _) => buttonTime.Tag = (string)buttonTime.Tag == "Time" ? "Length" : "Time";
+
+        //buttonTime.Click += (_, _) => buttonTime.Tag = (string)buttonTime.Tag == "Time" ? "Length" : "Time";
+
+        buttonTime.Click += (_, _) =>
+        {
+            buttonTime.Tag = (string)buttonTime.Tag == "Time"
+                ? "Length"
+                : "Time";
+
+            SettingHelper.Set(
+                "TimeDisplayMode",
+                (string)buttonTime.Tag,
+                "QuickLook.Plugin.VideoViewer"
+            );
+        };
+
         buttonMute.Click += (_, _) => volumeSliderLayer.Visibility = Visibility.Visible;
         volumeSliderLayer.MouseDown += (_, _) => volumeSliderLayer.Visibility = Visibility.Collapsed;
 
@@ -219,6 +244,7 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
     public void Dispose()
     {
+        StopStartupSeek();
         // old plugin use an int-typed "Volume" config key ranged from 0 to 100. Let's use a new one here.
         SettingHelper.Set("VolumeDouble", LinearVolume, "QuickLook.Plugin.VideoViewer");
         SettingHelper.Set("ShouldLoop", ShouldLoop, "QuickLook.Plugin.VideoViewer");
@@ -386,21 +412,62 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
         HasVideo = mediaElement.HasVideo;
 
-        // Apply once per video; reopening the decoder (S/W vs H/W) must not rewind it.
+        // Set up only once per video, not on a later HW/SW decoder rebuild.
         if (HasVideo && !_initialVideoSeekApplied)
         {
             _initialVideoSeekApplied = true;
-            int startSeconds = Math.Max(0,
-                SettingHelper.Get("StartAtSeconds", 10, "QuickLook.Plugin.VideoViewer"));
-            long startTicks = TimeSpan.FromSeconds(startSeconds).Ticks;
-            long durationTicks = mediaElement.MediaDuration;
-
-            // Short clips (or an unknown duration) start normally at 0 seconds.
-            if (startTicks > 0 && durationTicks > startTicks)
-                mediaElement.MediaPosition = startTicks;
+            int startSeconds = Math.Max(0, Math.Min(86400,
+                SettingHelper.Get("StartAtSeconds", 0, "QuickLook.Plugin.VideoViewer")));
+            if (startSeconds > 0)
+            {
+                _startupSeekTarget = TimeSpan.FromSeconds(startSeconds).Ticks;
+                _startupSeekTicks = 0;
+                _startupSeekAttempted = false;
+                StopStartupSeek();
+                _startupSeekTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+                _startupSeekTimer.Tick += TryStartAtConfiguredTime;
+                _startupSeekTimer.Start();
+            }
         }
 
         _context.IsBusy = false;
+    }
+
+    private void TryStartAtConfiguredTime(object sender, EventArgs e)
+    {
+        if (mediaElement == null || ++_startupSeekTicks > 40)
+        {
+            StopStartupSeek();
+            return;
+        }
+
+        long duration = mediaElement.MediaDuration;
+        if (duration <= 0)
+            return; // Wait for metadata (at most 6 seconds).
+        if (_startupSeekTarget >= duration)
+        {
+            StopStartupSeek(); // Short video: start at 0.
+            return;
+        }
+
+        if (_startupSeekAttempted)
+        {
+            long delta = Math.Abs(mediaElement.MediaPosition - _startupSeekTarget);
+            if (delta <= TimeSpan.FromSeconds(2).Ticks || _startupSeekTicks > 10)
+            {
+                StopStartupSeek();
+                return;
+            }
+        }
+
+        mediaElement.MediaPosition = _startupSeekTarget;
+        _startupSeekAttempted = true;
+    }
+
+    private void StopStartupSeek()
+    {
+        _startupSeekTimer?.Stop();
+        _startupSeekTimer = null;
     }
 
     private void MediaFailed(object sender, MediaFailedEventArgs e)
@@ -457,6 +524,82 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
         //var hide = (Storyboard)videoControlContainer.FindResource("HideControlStoryboard");
 
         //hide.Begin();
+    }
+
+    private void ShowVideoSettings(object sender, RoutedEventArgs e)
+    {
+        const string domain = "QuickLook.Plugin.VideoViewer";
+        var window = new Window
+        {
+            Title = "Video preview settings",
+            Owner = Window.GetWindow(this),
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            SizeToContent = SizeToContent.WidthAndHeight,
+            MinWidth = 350,
+            ResizeMode = ResizeMode.NoResize,
+            ShowInTaskbar = false
+        };
+
+        var layout = new StackPanel { Margin = new Thickness(18) };
+        layout.Children.Add(new TextBlock { Text = "Video size (% of original, 10-100)" });
+        var sizeBox = new TextBox
+        {
+            Text = SettingHelper.Get("VideoSizePercent", 80, domain).ToString(),
+            Width = 110,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 5, 0, 12)
+        };
+        layout.Children.Add(sizeBox);
+
+        layout.Children.Add(new TextBlock { Text = "Start playing at (seconds, 0-86400)" });
+        var startBox = new TextBox
+        {
+            Text = SettingHelper.Get("StartAtSeconds", 0, domain).ToString(),
+            Width = 110,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 5, 0, 10)
+        };
+        layout.Children.Add(startBox);
+        layout.Children.Add(new TextBlock
+        {
+            Text = "Changes take effect on the next video preview.",
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+        var save = new Button { Content = "Save", Width = 80, Height = 28, IsDefault = true };
+        var cancel = new Button
+        {
+            Content = "Cancel", Width = 80, Height = 28, IsCancel = true,
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        save.Click += (_, _) =>
+        {
+            if (!int.TryParse(sizeBox.Text.Trim(), out int size) || size < 10 || size > 100 ||
+                !int.TryParse(startBox.Text.Trim(), out int seconds) || seconds < 0 || seconds > 86400)
+            {
+                MessageBox.Show(window,
+                    "Video size must be 10-100%; start time must be 0-86400 seconds.",
+                    "Invalid video settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            SettingHelper.Set("VideoSizePercent", size, domain);
+            SettingHelper.Set("StartAtSeconds", seconds, domain);
+            window.DialogResult = true;
+        };
+        cancel.Click += (_, _) => window.DialogResult = false;
+        buttons.Children.Add(save);
+        buttons.Children.Add(cancel);
+        layout.Children.Add(buttons);
+        window.Content = layout;
+        window.Loaded += (_, _) => sizeBox.Focus();
+        window.ShowDialog();
+        Focus();
     }
 
     private void PlayerStateChanged(PlayerState oldState, PlayerState newState)
