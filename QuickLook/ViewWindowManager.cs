@@ -1,4 +1,4 @@
-﻿// Copyright © 2017-2026 QL-Win Contributors
+// Copyright © 2017-2026 QL-Win Contributors
 //
 // This file is part of QuickLook program.
 //
@@ -16,12 +16,16 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using QuickLook.Common.Helpers;
+using Microsoft.VisualBasic.FileIO;
+using System.Linq;
+using System.Threading.Tasks;
 using QuickLook.Common.Plugin;
 using QuickLook.Helpers;
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.ExceptionServices;
+using System.Windows;
 
 namespace QuickLook;
 
@@ -31,6 +35,7 @@ public class ViewWindowManager : IDisposable
 
     private string _invokedPath = string.Empty;
     private ViewerWindow _viewerWindow;
+    private bool _deleteNextInProgress;
 
     internal ViewWindowManager()
     {
@@ -73,6 +78,144 @@ public class ViewWindowManager : IDisposable
         _viewerWindow.Close();
     }
 
+    // Called only by VideoViewer when Delete is pressed in the focused preview.
+    // Files are moved to Recycle Bin; the next video is chosen by NAME, not Explorer sort order.
+    // Next / previous VIDEO by file name, regardless of Explorer focus.
+    // This does not follow Explorer custom sorting (Date, Length, etc.).
+    public void PreviewAdjacentVideo(int direction)
+    {
+        if (!_viewerWindow.IsVisible || direction == 0)
+            return;
+
+        try
+        {
+            var next = FindAdjacentVideoPath(_invokedPath, Math.Sign(direction));
+            if (!string.IsNullOrEmpty(next) && File.Exists(next))
+            {
+                InvokePreview(next); // Reuse the current ViewerWindow.
+                RestoreVideoPlayerFocus(next);
+            }
+        }
+        catch (Exception ex)
+        {
+            ProcessHelper.WriteLog("VideoSkim: Could not navigate video: " + ex);
+        }
+    }
+
+    // The original QuickLook UnloadPlugin() clears WPF keyboard focus.
+    // Once the replacement ViewerPanel has been created and laid out,
+    // return focus to it so N / P / Delete work repeatedly without a click.
+    // Call this ONLY for player-initiated navigation (not Explorer-driven preview).
+    private void RestoreVideoPlayerFocus(string expectedPath)
+    {
+        var window = _viewerWindow;
+        window.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!window.IsVisible || !ReferenceEquals(window, _viewerWindow) ||
+                !string.Equals(_invokedPath, expectedPath, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (window.ContextObject.ViewerContent is System.Windows.FrameworkElement panel)
+            {
+                window.Activate();
+                panel.Focus();
+                System.Windows.Input.Keyboard.Focus(panel);
+            }
+        }), System.Windows.Threading.DispatcherPriority.ContextIdle);
+    }
+    private static string FindAdjacentVideoPath(string current, int direction)
+    {
+        if (string.IsNullOrWhiteSpace(current) || !File.Exists(current))
+            return null;
+
+        var supported = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp4", ".m4v", ".mkv", ".mov", ".avi", ".wmv", ".webm",
+            ".mpg", ".mpeg", ".ts", ".mts", ".m2ts", ".flv", ".3gp"
+        };
+
+        var files = Directory.EnumerateFiles(Path.GetDirectoryName(current))
+            .Where(file => supported.Contains(Path.GetExtension(file)))
+            .OrderBy(file => Path.GetFileName(file), StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var index = Array.FindIndex(files,
+            file => string.Equals(file, current, StringComparison.OrdinalIgnoreCase));
+        var neighbor = index + direction;
+        return index >= 0 && neighbor >= 0 && neighbor < files.Length
+            ? files[neighbor]
+            : null;
+    }
+
+    // Switch preview first, then recycle the OLD video after its DirectShow handle
+    // has been released. The preview window stays open when a neighbor exists.
+    public async void DeleteCurrentVideoAndPreviewNext()
+    {
+        if (_deleteNextInProgress || !_viewerWindow.IsVisible)
+            return;
+
+        var current = _invokedPath;
+        if (string.IsNullOrWhiteSpace(current) || !File.Exists(current))
+            return;
+
+        // No reliable Recycle Bin on UNC network paths; never delete permanently.
+        if (current.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            MessageBox.Show(_viewerWindow, "Network files cannot be recycled by this feature.",
+                "QuickLook VideoSkim", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        _deleteNextInProgress = true;
+        try
+        {
+            var next = FindAdjacentVideoPath(current, 1)
+                       ?? FindAdjacentVideoPath(current, -1);
+
+            if (!string.IsNullOrEmpty(next) && File.Exists(next))
+            {
+                InvokePreview(next); // Same ViewerWindow as normal Next; unloads old video.
+                RestoreVideoPlayerFocus(next);
+                if (!string.Equals(_invokedPath, next, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Could not switch away from the current video. Nothing deleted.");
+            }
+            else
+            {
+                ClosePreview(); // No other video can be displayed.
+            }
+
+            // Cleanup of MediaUriPlayer is async in this QuickLook branch.
+            await Task.Delay(250);
+
+            // Do not block the WPF UI while the old file is moved to Recycle Bin.
+            // The actual old file is captured above even though _invokedPath now points to next.
+            for (int attempt = 0; attempt < 12; attempt++)
+            {
+                try
+                {
+                    await Task.Run(() => FileSystem.DeleteFile(current,
+                        UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin));
+                    if (File.Exists(current))
+                        throw new IOException("The old video still exists after the recycle operation.");
+                    return;
+                }
+                catch (IOException) when (attempt < 11)
+                {
+                    await Task.Delay(300); // Give DirectShow time to release old video.
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ProcessHelper.WriteLog("VideoSkim: Recycle failed: " + ex);
+            // Keep the NEW preview active. Do not force the old file open again.
+            MessageBox.Show("Could not move the previous video to the Recycle Bin:\n" + ex.Message,
+                "QuickLook VideoSkim", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _deleteNextInProgress = false;
+        }
+    }
     public void TogglePreview(string path = null, string options = null)
     {
         if (string.IsNullOrEmpty(path))

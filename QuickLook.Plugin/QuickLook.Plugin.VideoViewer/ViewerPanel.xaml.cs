@@ -1,4 +1,4 @@
-﻿// Copyright © 2017-2026 QL-Win Contributors
+// Copyright © 2017-2026 QL-Win Contributors
 //
 // This file is part of QuickLook program.
 //
@@ -62,6 +62,10 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
     private int _startupSeekTicks;
     private long _startupSeekTarget;
     private bool _startupSeekAttempted;
+    private int _startupSeekStableTicks;
+    private int _startupSeekRetryCount;
+    private int _startupSeekLastAttemptTick;
+    private bool _startupSeekReachedTarget;
 
     // Preset playback speeds cycled through by the speed button and the +/- hotkeys.
     private static readonly double[] SpeedPresets = [0.25d, 0.5d, 0.75d, 1.0d, 1.5d, 2.0d, 3.0d, 4.0d];
@@ -144,6 +148,7 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
         sliderProgress.PreviewMouseDown += (_, e) =>
         {
+            StopStartupSeek();
             _wasPlaying = mediaElement.IsPlaying;
             mediaElement.Pause();
         };
@@ -333,6 +338,21 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
                 e.Handled = true;
                 break;
 
+            case Key.Delete when modifiers == ModifierKeys.None && HasVideo:
+                e.Handled = true;
+                PluginHelper.DeleteCurrentVideoAndPreviewNext();
+                break;
+
+            case Key.N when modifiers == ModifierKeys.None && HasVideo:
+                e.Handled = true;
+                PluginHelper.PreviewAdjacentVideo(1);
+                break;
+
+            case Key.P when modifiers == ModifierKeys.None && HasVideo:
+                e.Handled = true;
+                PluginHelper.PreviewAdjacentVideo(-1);
+                break;
+
             case Key.Home when modifiers == ModifierKeys.None:
                 SeekTo(0L);
                 e.Handled = true;
@@ -373,6 +393,7 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
     /// <summary>Seeks the timeline to an absolute position, clamped to the media's duration.</summary>
     private void SeekTo(long positionTicks)
     {
+        StopStartupSeek(); // A manual seek must override StartAtSeconds.
         if (mediaElement == null)
             return;
 
@@ -423,6 +444,10 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
                 _startupSeekTarget = TimeSpan.FromSeconds(startSeconds).Ticks;
                 _startupSeekTicks = 0;
                 _startupSeekAttempted = false;
+                _startupSeekStableTicks = 0;
+                _startupSeekRetryCount = 0;
+                _startupSeekLastAttemptTick = 0;
+                _startupSeekReachedTarget = false;
                 StopStartupSeek();
                 _startupSeekTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
                 _startupSeekTimer.Tick += TryStartAtConfiguredTime;
@@ -435,7 +460,10 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
     private void TryStartAtConfiguredTime(object sender, EventArgs e)
     {
-        if (mediaElement == null || ++_startupSeekTicks > 40)
+        // Some DirectShow graphs report the requested seek position before the
+        // decoder has finished initializing; a subsequent graph reset returns to 0.
+        // Keep checking for several seconds after the first apparent success.
+        if (mediaElement == null || ++_startupSeekTicks > 60)
         {
             StopStartupSeek();
             return;
@@ -443,25 +471,53 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
         long duration = mediaElement.MediaDuration;
         if (duration <= 0)
-            return; // Wait for metadata (at most 6 seconds).
+            return;
         if (_startupSeekTarget >= duration)
         {
-            StopStartupSeek(); // Short video: start at 0.
+            StopStartupSeek(); // Short clip: play from beginning.
+            return;
+        }
+
+        long position = mediaElement.MediaPosition;
+        long tolerance = TimeSpan.FromSeconds(2).Ticks;
+
+        // The target was reached. Keep monitoring for ~4 seconds rather than
+        // stopping on the first reading near StartAtSeconds.
+        if (_startupSeekAttempted && position >= _startupSeekTarget - tolerance)
+        {
+            _startupSeekReachedTarget = true;
+            ++_startupSeekStableTicks;
+            if (_startupSeekStableTicks >= 27)
+                StopStartupSeek();
             return;
         }
 
         if (_startupSeekAttempted)
         {
-            long delta = Math.Abs(mediaElement.MediaPosition - _startupSeekTarget);
-            if (delta <= TimeSpan.FromSeconds(2).Ticks || _startupSeekTicks > 10)
+            // If the position drops back toward 0 after first reaching the target,
+            // retry a bounded number of times; do not loop forever on bad videos.
+            if (_startupSeekReachedTarget)
             {
+                ProcessHelper.WriteLog($"VideoSkim: StartAtSeconds reset from target={TimeSpan.FromTicks(_startupSeekTarget)} to position={TimeSpan.FromTicks(Math.Max(0L,position))} (retry={_startupSeekRetryCount}).");
+                _startupSeekReachedTarget = false;
+                _startupSeekStableTicks = 0;
+            }
+
+            if (_startupSeekTicks - _startupSeekLastAttemptTick < 4)
+                return; // Wait 600ms between attempts.
+
+            if (_startupSeekRetryCount >= 3)
+            {
+                ProcessHelper.WriteLog("VideoSkim: startup seek gave up after 3 retries.");
                 StopStartupSeek();
                 return;
             }
+            ++_startupSeekRetryCount;
         }
 
         mediaElement.MediaPosition = _startupSeekTarget;
         _startupSeekAttempted = true;
+        _startupSeekLastAttemptTick = _startupSeekTicks;
     }
 
     private void StopStartupSeek()
@@ -486,6 +542,7 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
     private void MediaEnded(object sender, RoutedEventArgs e)
     {
+        StopStartupSeek();
         if (mediaElement == null)
             return;
 

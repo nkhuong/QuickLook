@@ -1,4 +1,4 @@
-﻿// Copyright © 2017-2026 QL-Win Contributors
+// Copyright © 2017-2026 QL-Win Contributors
 //
 // This file is part of QuickLook program.
 //
@@ -32,6 +32,16 @@ public static class PluginHelper
     public static void InvokePreview(string path = null)
     {
         GetInstance()?.InvokePreview(path);
+    }
+
+    public static void DeleteCurrentVideoAndPreviewNext()
+    {
+        GetInstance()?.DeleteCurrentVideoAndPreviewNext();
+    }
+
+    public static void PreviewAdjacentVideo(int direction)
+    {
+        GetInstance()?.PreviewAdjacentVideo(direction);
     }
 
     public static void InvokePreviewWithOption(string path = null, string options = null)

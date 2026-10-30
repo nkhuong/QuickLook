@@ -37,16 +37,16 @@
       <ErrorReport>prompt</ErrorReport>
     </PropertyGroup>
 
-    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
-        <OutputPath>..\..\Build\Release\QuickLook.Plugin\QuickLook.Plugin.VideoViewer\</OutputPath>
-        <DefineConstants>TRACE</DefineConstants>
-        <Optimize>true</Optimize>
-        <DebugType>pdbonly</DebugType>
-        <PlatformTarget>AnyCPU</PlatformTarget>
-        <ErrorReport>prompt</ErrorReport>
-    </PropertyGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Release' And ('$(Platform)' == 'AnyCPU' Or '$(Platform)' == 'x64')">
+		<OutputPath>..\..\Build\Release\QuickLook.Plugin\QuickLook.Plugin.VideoViewer\</OutputPath>
+		<DefineConstants>TRACE</DefineConstants>
+		<Optimize>true</Optimize>
+		<DebugType>pdbonly</DebugType>
+		<PlatformTarget>AnyCPU</PlatformTarget>
+		<ErrorReport>prompt</ErrorReport>
+	</PropertyGroup>
 
-    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
       <OutputPath>..\..\Build\Release\QuickLook.Plugin\QuickLook.Plugin.VideoViewer\</OutputPath>
       <DefineConstants>TRACE</DefineConstants>
       <Optimize>true</Optimize>
@@ -226,12 +226,5 @@
             <Link>Properties\GitVersion.cs</Link>
         </Compile>
     </ItemGroup>
-
-
-	<PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-		<OutputPath>..\..\Build\Release\QuickLook.Plugin\QuickLook.Plugin.VideoViewer\</OutputPath>
-		<PlatformTarget>AnyCPU</PlatformTarget>
-		<Optimize>true</Optimize>
-	</PropertyGroup>
 
 </Project>

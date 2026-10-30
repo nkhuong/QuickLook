@@ -56,7 +56,7 @@
       <ErrorReport>prompt</ErrorReport>
     </PropertyGroup>
 
-    <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|AnyCPU'">
+    <PropertyGroup Condition="'$(Configuration)' == 'Release' And ('$(Platform)' == 'AnyCPU' Or '$(Platform)' == 'x64')">
         <OutputPath>..\..\Build\Release\QuickLook.Plugin\QuickLook.Plugin.ImageViewer\</OutputPath>
         <DefineConstants>TRACE</DefineConstants>
         <Optimize>true</Optimize>

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
 
     <PropertyGroup>
         <OutputType>WinExe</OutputType>
@@ -94,6 +94,7 @@
 
     <ItemGroup>
         <Reference Include="System.Management" />
+        <Reference Include="Microsoft.VisualBasic" />
         <Reference Include="Microsoft.CSharp" />
         <!-- If your Windows SDK path is inconsistent with the following `HintPath`, please use a soft link, such as following command. -->
         <!-- Requires admin permissions: mklink /D "C:\Program Files (x86)\Windows Kits\10\" "C:\Windows Kits\10\" -->

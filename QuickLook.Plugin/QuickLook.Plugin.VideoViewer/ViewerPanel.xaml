@@ -219,6 +219,11 @@
                     <TextBlock VerticalAlignment="Center"
                                Text="{Binding PlaybackSpeed, ElementName=viewerPanel, StringFormat={}{0:0.##}x}" />
                 </Button>
+                <Button x:Name="buttonSettings"
+                        DockPanel.Dock="Right"
+                        Style="{StaticResource ControlButtonStyle}"
+                        Content="&#xE713;"
+                        ToolTip="Video preview settings" />
                 <Button x:Name="buttonMute"
                         DockPanel.Dock="Right"
                         ToolTip="Volume">
