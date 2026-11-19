@@ -1,4 +1,4 @@
-﻿// Copyright © 2017-2026 QL-Win Contributors
+// Copyright © 2017-2026 QL-Win Contributors
 //
 // This file is part of QuickLook program.
 //
@@ -17,6 +17,7 @@
 
 using QuickLook.Common.Helpers;
 using QuickLook.Common.NativeMethods;
+using QuickLook.Common.Plugin;
 using QuickLook.Helpers;
 using System;
 using System.Collections.Generic;
@@ -38,6 +39,8 @@ internal class KeystrokeDispatcher : IDisposable
     private bool _spaceIsDown;
     private long _spaceHoldTick;
     private long _lastInvalidKeyPressTick;
+    private readonly HashSet<Keys> _videoSkimHeldKeys = new();
+    private readonly HashSet<Keys> _videoSkimPlaybackHeldKeys = new();
 
     private const long HOLD_TO_PREVIEW_DURATION = TimeSpan.TicksPerMillisecond * 750;
     private const long VALID_KEY_PRESS_DELAY = TimeSpan.TicksPerSecond * 1;
@@ -79,6 +82,11 @@ internal class KeystrokeDispatcher : IDisposable
 
     private void CallViewWindowManagerInvokeRoutine(KeyEventArgs e, bool isKeyDown)
     {
+        if (TryHandleVideoSkimGlobalKey(e, isKeyDown))
+            return;
+        if (TryHandleVideoSkimPlaybackKey(e, isKeyDown))
+            return;
+
         // skip invalid keys, but record the timestamp
         if (!_validKeys.Contains(e.KeyCode))
         {
@@ -136,6 +144,149 @@ internal class KeystrokeDispatcher : IDisposable
         }
     }
 
+    // VideoSkim hotkeys must survive QuickLook's UnloadPlugin/Keyboard.ClearFocus.
+    // GlobalKeyboardHook is already installed by QuickLook, so this does NOT
+    // install a second global hook. No modifiers are accepted.
+    private bool TryHandleVideoSkimGlobalKey(KeyEventArgs e, bool isKeyDown)
+    {
+        var key = e.KeyCode;
+        if (key != Keys.N && key != Keys.P && key != Keys.Delete)
+            return false;
+
+        // Swallow KeyUp only if this same key's KeyDown was handled here.
+        if (!isKeyDown)
+        {
+            if (_videoSkimHeldKeys.Remove(key))
+            {
+                e.Handled = true;
+                return true;
+            }
+            return false;
+        }
+
+        if (e.Modifiers != Keys.None)
+            return false;
+
+        try
+        {
+            // Only the foreground video PREVIEW HWND, not other QuickLook
+            // dialogs, Explorer, or any other application.
+            var manager = ViewWindowManager.GetInstance();
+            if (!manager.IsVideoSkimPreviewForeground())
+                return false;
+
+            e.Handled = true; // Prevent the WPF panel from handling it twice.
+            if (!_videoSkimHeldKeys.Add(key))
+                return true; // Ignore keyboard auto-repeat (important for Delete).
+
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                // Foreground might have changed while this work was queued.
+                if (!manager.IsVideoSkimPreviewForeground())
+                    return;
+
+                switch (key)
+                {
+                    case Keys.N:
+                        manager.PreviewAdjacentVideo(1);
+                        break;
+                    case Keys.P:
+                        manager.PreviewAdjacentVideo(-1);
+                        break;
+                    case Keys.Delete:
+                        manager.DeleteCurrentVideoAndPreviewNext();
+                        break;
+                }
+            }));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("VideoSkim global hotkey failed: " + ex);
+            return false;
+        }
+    }
+    // Playback commands use the SAME low-level hook as VideoSkim N/P/Delete.
+    // They run only while the actual preview HWND is foreground (not Explorer,
+    // Settings dialogs or other QuickLook windows). No extra hook is installed.
+    private bool TryHandleVideoSkimPlaybackKey(KeyEventArgs e, bool isKeyDown)
+    {
+        var key = e.KeyCode;
+
+        // Ignore key repeat while held; swallow KeyUp for keys handled on KeyDown.
+        if (!isKeyDown)
+        {
+            if (_videoSkimPlaybackHeldKeys.Remove(key))
+            {
+                e.Handled = true;
+                return true;
+            }
+            return false;
+        }
+
+        PreviewHotkey? action = null;
+        switch (key)
+        {
+            case Keys.Left when e.Modifiers == Keys.Shift:
+                action = PreviewHotkey.SeekBack10;
+                break;
+            case Keys.Right when e.Modifiers == Keys.Shift:
+                action = PreviewHotkey.SeekForward10;
+                break;
+            case Keys.Left when e.Modifiers == Keys.Control:
+                action = PreviewHotkey.SeekBack30;
+                break;
+            case Keys.Right when e.Modifiers == Keys.Control:
+                action = PreviewHotkey.SeekForward30;
+                break;
+            case Keys.Home when e.Modifiers == Keys.None:
+                action = PreviewHotkey.SeekStart;
+                break;
+            case Keys.End when e.Modifiers == Keys.None:
+                action = PreviewHotkey.SeekEnd;
+                break;
+            case Keys.Oemplus when e.Modifiers == Keys.None || e.Modifiers == Keys.Shift:
+            case Keys.Add when e.Modifiers == Keys.None:
+                action = PreviewHotkey.SpeedUp;
+                break;
+            case Keys.OemMinus when e.Modifiers == Keys.None:
+            case Keys.Subtract when e.Modifiers == Keys.None:
+                action = PreviewHotkey.SpeedDown;
+                break;
+            case Keys.D0 when e.Modifiers == Keys.None:
+            case Keys.NumPad0 when e.Modifiers == Keys.None:
+                action = PreviewHotkey.SpeedReset;
+                break;
+        }
+        if (!action.HasValue)
+            return false;
+
+        try
+        {
+            var manager = ViewWindowManager.GetInstance();
+            if (!manager.IsVideoSkimPreviewForeground())
+                return false;
+
+            e.Handled = true; // Do not deliver a duplicate WPF PreviewKeyDown.
+            if (!_videoSkimPlaybackHeldKeys.Add(key))
+                return true;
+
+            var capturedAction = action.Value;
+            // ViewerWindow.BeginShow loads the replacement VideoViewer on the UI
+            // dispatcher. ContextIdle lets that load finish before handling a key.
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (manager.IsVideoSkimPreviewForeground())
+                    manager.DispatchVideoSkimPlaybackHotkey(capturedAction);
+            }), System.Windows.Threading.DispatcherPriority.Background);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("VideoSkim playback shortcut failed: " + ex);
+            return false;
+        }
+    }
     private void InvokeRoutine(Keys key, bool isKeyDown)
     {
         Debug.WriteLine($"InvokeRoutine: key={key},down={isKeyDown}");

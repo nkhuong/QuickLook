@@ -82,6 +82,29 @@ public class ViewWindowManager : IDisposable
     // Files are moved to Recycle Bin; the next video is chosen by NAME, not Explorer sort order.
     // Next / previous VIDEO by file name, regardless of Explorer focus.
     // This does not follow Explorer custom sorting (Date, Length, etc.).
+    // This comparison is intentionally by HWND, not Keyboard.FocusedElement:
+    // focus may move to a header button or be cleared during preview switching.
+    // The UI thread calls this after the preview content is loaded.
+    // Interface check means other plugins never receive video commands.
+    internal void DispatchVideoSkimPlaybackHotkey(PreviewHotkey action)
+    {
+        if (!IsVideoSkimPreviewForeground())
+            return;
+
+        if (_viewerWindow.ContextObject.ViewerContent is IPreviewHotkeyHandler handler)
+            handler.HandlePreviewHotkey(action);
+    }
+    internal bool IsVideoSkimPreviewForeground()
+    {
+        var window = _viewerWindow;
+        if (window == null || !window.IsVisible ||
+            window.Plugin?.GetType().FullName != "QuickLook.Plugin.VideoViewer.Plugin")
+            return false;
+
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        return hwnd != IntPtr.Zero &&
+               hwnd == QuickLook.Common.NativeMethods.User32.GetForegroundWindow();
+    }
     public void PreviewAdjacentVideo(int direction)
     {
         if (!_viewerWindow.IsVisible || direction == 0)
@@ -93,7 +116,6 @@ public class ViewWindowManager : IDisposable
             if (!string.IsNullOrEmpty(next) && File.Exists(next))
             {
                 InvokePreview(next); // Reuse the current ViewerWindow.
-                RestoreVideoPlayerFocus(next);
             }
         }
         catch (Exception ex)
@@ -102,50 +124,104 @@ public class ViewWindowManager : IDisposable
         }
     }
 
-    // The original QuickLook UnloadPlugin() clears WPF keyboard focus.
-    // Once the replacement ViewerPanel has been created and laid out,
-    // return focus to it so N / P / Delete work repeatedly without a click.
-    // Call this ONLY for player-initiated navigation (not Explorer-driven preview).
-    private void RestoreVideoPlayerFocus(string expectedPath)
-    {
-        var window = _viewerWindow;
-        window.Dispatcher.BeginInvoke(new Action(() =>
-        {
-            if (!window.IsVisible || !ReferenceEquals(window, _viewerWindow) ||
-                !string.Equals(_invokedPath, expectedPath, StringComparison.OrdinalIgnoreCase))
-                return;
-
-            if (window.ContextObject.ViewerContent is System.Windows.FrameworkElement panel)
-            {
-                window.Activate();
-                panel.Focus();
-                System.Windows.Input.Keyboard.Focus(panel);
-            }
-        }), System.Windows.Threading.DispatcherPriority.ContextIdle);
-    }
-    private static string FindAdjacentVideoPath(string current, int direction)
-    {
-        if (string.IsNullOrWhiteSpace(current) || !File.Exists(current))
-            return null;
-
-        var supported = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    // VideoSkimNavigationSortCache: no media files are opened for sorting.
+    // Cache avoids re-enumerating directories on every N/P/Delete. Rebuild after
+    // 5 seconds, changing folders or settings, or a successful recycle operation.
+    private readonly System.Collections.Generic.HashSet<string> _videoSkimExtensions =
+        new(StringComparer.OrdinalIgnoreCase)
         {
             ".mp4", ".m4v", ".mkv", ".mov", ".avi", ".wmv", ".webm",
             ".mpg", ".mpeg", ".ts", ".mts", ".m2ts", ".flv", ".3gp"
         };
+    private string[] _videoSkimCachedFiles;
+    private string _videoSkimCachedFolder;
+    private string _videoSkimCachedSort;
+    private bool _videoSkimCachedDescending;
+    private DateTime _videoSkimCacheExpiresUtc = DateTime.MinValue;
 
-        var files = Directory.EnumerateFiles(Path.GetDirectoryName(current))
-            .Where(file => supported.Contains(Path.GetExtension(file)))
-            .OrderBy(file => Path.GetFileName(file), StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var index = Array.FindIndex(files,
-            file => string.Equals(file, current, StringComparison.OrdinalIgnoreCase));
-        var neighbor = index + direction;
-        return index >= 0 && neighbor >= 0 && neighbor < files.Length
-            ? files[neighbor]
-            : null;
+    private void InvalidateVideoSkimFileCache()
+    {
+        _videoSkimCacheExpiresUtc = DateTime.MinValue;
     }
 
+    private string[] GetSortedVideoSkimFiles(string folder)
+    {
+        const string domain = "QuickLook.Plugin.VideoViewer";
+        var sort = SettingHelper.Get("VideoSortBy", "Name", domain);
+        if (sort != "Size" && sort != "Date") sort = "Name";
+        bool desc = SettingHelper.Get("VideoSortDescending", false, domain);
+        if (_videoSkimCachedFiles != null &&
+            string.Equals(folder, _videoSkimCachedFolder, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(sort, _videoSkimCachedSort, StringComparison.Ordinal) &&
+            desc == _videoSkimCachedDescending && DateTime.UtcNow < _videoSkimCacheExpiresUtc)
+            return _videoSkimCachedFiles;
+
+        var items = new DirectoryInfo(folder).EnumerateFiles()
+            .Where(file => _videoSkimExtensions.Contains(file.Extension));
+        System.Collections.Generic.IEnumerable<FileInfo> ordered;
+        switch (sort)
+        {
+            case "Size":
+                ordered = desc
+                    ? items.OrderByDescending(file => file.Length)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.Length)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+            case "Date":
+                ordered = desc
+                    ? items.OrderByDescending(file => file.LastWriteTimeUtc)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.LastWriteTimeUtc)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+            default:
+                ordered = desc
+                    ? items.OrderByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+        }
+
+        var paths = ordered.Select(file => file.FullName).ToArray();
+        _videoSkimCachedFiles = paths;
+        _videoSkimCachedFolder = folder;
+        _videoSkimCachedSort = sort;
+        _videoSkimCachedDescending = desc;
+        _videoSkimCacheExpiresUtc = DateTime.UtcNow.AddSeconds(5);
+        return paths;
+    }
+
+    private string FindAdjacentVideoPath(string current, int direction)
+    {
+        if (direction == 0 || string.IsNullOrWhiteSpace(current) || !File.Exists(current))
+            return null;
+
+        var folder = Path.GetDirectoryName(current);
+        for (int pass = 0; pass < 2; pass++)
+        {
+            var files = GetSortedVideoSkimFiles(folder);
+            var index = Array.FindIndex(files,
+                file => string.Equals(file, current, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                InvalidateVideoSkimFileCache();
+                continue; // File list may have changed since the previous preview.
+            }
+
+            bool foundMissing = false;
+            for (int neighbor = index + Math.Sign(direction);
+                 neighbor >= 0 && neighbor < files.Length;
+                 neighbor += Math.Sign(direction))
+            {
+                if (File.Exists(files[neighbor]))
+                    return files[neighbor];
+                foundMissing = true;
+            }
+            if (!foundMissing) return null; // At first/last video: no rescan.
+            if (pass == 0) InvalidateVideoSkimFileCache();
+        }
+        return null;
+    }
     // Switch preview first, then recycle the OLD video after its DirectShow handle
     // has been released. The preview window stays open when a neighbor exists.
     public async void DeleteCurrentVideoAndPreviewNext()
@@ -174,7 +250,6 @@ public class ViewWindowManager : IDisposable
             if (!string.IsNullOrEmpty(next) && File.Exists(next))
             {
                 InvokePreview(next); // Same ViewerWindow as normal Next; unloads old video.
-                RestoreVideoPlayerFocus(next);
                 if (!string.Equals(_invokedPath, next, StringComparison.OrdinalIgnoreCase))
                     throw new IOException("Could not switch away from the current video. Nothing deleted.");
             }
@@ -196,6 +271,7 @@ public class ViewWindowManager : IDisposable
                         UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin));
                     if (File.Exists(current))
                         throw new IOException("The old video still exists after the recycle operation.");
+                    InvalidateVideoSkimFileCache();
                     return;
                 }
                 catch (IOException) when (attempt < 11)

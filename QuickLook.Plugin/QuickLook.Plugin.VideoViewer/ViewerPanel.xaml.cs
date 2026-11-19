@@ -43,9 +43,10 @@ using WPFMediaKit.DirectShow.MediaPlayers;
 
 namespace QuickLook.Plugin.VideoViewer;
 
-public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChanged
+public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChanged, IPreviewHotkeyHandler
 {
     private readonly ContextObject _context;
+
     private BitmapSource _coverArt;
     private DispatcherTimer _lyricTimer;
     private LrcLine[] _lyricLines;
@@ -159,13 +160,6 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
         PreviewMouseWheel += (_, e) => ChangeVolume(e.Delta / 120d * 0.04d);
 
-        // Keyboard hotkeys for seeking the timeline and changing playback speed.
-        // Keep keyboard focus on the panel itself: every child control in this panel
-        // (buttons, sliders) is Focusable="False" by design, so focus otherwise stays
-        // on the host window and PreviewKeyDown here would not fire on it.
-        Focusable = true;
-        Loaded += (_, _) => Focus();
-        PreviewKeyDown += ViewerPanel_PreviewKeyDown;
     }
 
     private partial void LoadAndInsertGlassLayer();
@@ -280,9 +274,6 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
     private void Panel_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        // Make sure the panel (not the window) owns keyboard focus, so that the
-        // seek/speed hotkeys keep working after the user interacts with the mouse.
-        Focus();
 
         if (e.LeftButton == MouseButtonState.Pressed)
         {
@@ -295,93 +286,45 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
         }
     }
 
-    /// <summary>
-    /// Handles keyboard shortcuts for timeline seeking and playback speed.
-    ///
-    /// Plain Left/Right/Up/Down are deliberately NOT used here: QuickLook's global
-    /// low-level keyboard hook (see QuickLook.KeystrokeDispatcher) already reuses those
-    /// keys system-wide to switch between files in Explorer, and it never marks the
-    /// keystroke as handled, so it would still reach this handler too. Using modifier
-    /// combinations avoids fighting over the same keys:
-    ///   Shift+Left / Shift+Right  - seek 5 seconds backward/forward
-    ///   Ctrl+Left  / Ctrl+Right   - seek 30 seconds backward/forward
-    ///   Home / End                - jump to the start/end of the media
-    ///   +/-  (OemPlus/OemMinus)   - increase/decrease playback speed
-    ///   0    (D0/NumPad0)         - reset playback speed to 1.0x
-    /// </summary>
-    private void ViewerPanel_PreviewKeyDown(object sender, KeyEventArgs e)
+    /// <summary>Seeks the timeline by a relative amount of 100ns ticks (same unit as MediaPosition).</summary>
+    // Called by the QuickLook global shortcut dispatcher on the UI thread.
+    // All actions reuse the working seek/speed methods and affect only videos.
+    public void HandlePreviewHotkey(PreviewHotkey action)
     {
-        if (mediaElement?.Source == null)
+        if (!HasVideo || mediaElement?.Source == null)
             return;
 
-        var modifiers = Keyboard.Modifiers;
-
-        switch (e.Key)
+        switch (action)
         {
-            case Key.Left when modifiers == ModifierKeys.Shift:
+            case PreviewHotkey.SeekBack10:
                 Seek(-ShortSeekTicks);
-                e.Handled = true;
                 break;
-
-            case Key.Right when modifiers == ModifierKeys.Shift:
+            case PreviewHotkey.SeekForward10:
                 Seek(ShortSeekTicks);
-                e.Handled = true;
                 break;
-
-            case Key.Left when modifiers == ModifierKeys.Control:
+            case PreviewHotkey.SeekBack30:
                 Seek(-LongSeekTicks);
-                e.Handled = true;
                 break;
-
-            case Key.Right when modifiers == ModifierKeys.Control:
+            case PreviewHotkey.SeekForward30:
                 Seek(LongSeekTicks);
-                e.Handled = true;
                 break;
-
-            case Key.Delete when modifiers == ModifierKeys.None && HasVideo:
-                e.Handled = true;
-                PluginHelper.DeleteCurrentVideoAndPreviewNext();
-                break;
-
-            case Key.N when modifiers == ModifierKeys.None && HasVideo:
-                e.Handled = true;
-                PluginHelper.PreviewAdjacentVideo(1);
-                break;
-
-            case Key.P when modifiers == ModifierKeys.None && HasVideo:
-                e.Handled = true;
-                PluginHelper.PreviewAdjacentVideo(-1);
-                break;
-
-            case Key.Home when modifiers == ModifierKeys.None:
+            case PreviewHotkey.SeekStart:
                 SeekTo(0L);
-                e.Handled = true;
                 break;
-
-            case Key.End when modifiers == ModifierKeys.None:
+            case PreviewHotkey.SeekEnd:
                 SeekTo(Math.Max(0L, mediaElement.MediaDuration - TimeSpan.FromMilliseconds(100).Ticks));
-                e.Handled = true;
                 break;
-
-            case Key.OemPlus when modifiers == ModifierKeys.None || modifiers == ModifierKeys.Shift:
-            case Key.Add when modifiers == ModifierKeys.None:
+            case PreviewHotkey.SpeedUp:
                 CycleSpeed(1);
-                e.Handled = true;
                 break;
-
-            case Key.OemMinus or Key.Subtract when modifiers == ModifierKeys.None:
+            case PreviewHotkey.SpeedDown:
                 CycleSpeed(-1);
-                e.Handled = true;
                 break;
-
-            case Key.D0 or Key.NumPad0 when modifiers == ModifierKeys.None:
+            case PreviewHotkey.SpeedReset:
                 PlaybackSpeed = 1.0d;
-                e.Handled = true;
                 break;
         }
     }
-
-    /// <summary>Seeks the timeline by a relative amount of 100ns ticks (same unit as MediaPosition).</summary>
     private void Seek(long deltaTicks)
     {
         if (mediaElement == null)
@@ -617,6 +560,34 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
             Margin = new Thickness(0, 5, 0, 10)
         };
         layout.Children.Add(startBox);
+
+        layout.Children.Add(new TextBlock { Text = "Next / Previous order" });
+        var sortBox = new ComboBox
+        {
+            Width = 200,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 5, 0, 10)
+        };
+        sortBox.Items.Add("Name");
+        sortBox.Items.Add("Size");
+        sortBox.Items.Add("Date");
+        var configuredSort = SettingHelper.Get("VideoSortBy", "Name", domain);
+        sortBox.SelectedItem = sortBox.Items.Contains(configuredSort) ? configuredSort : "Name";
+        layout.Children.Add(sortBox);
+
+        layout.Children.Add(new TextBlock { Text = "Sort direction" });
+        var sortDirectionBox = new ComboBox
+        {
+            Width = 200,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 5, 0, 12)
+        };
+        sortDirectionBox.Items.Add("Ascending");
+        sortDirectionBox.Items.Add("Descending");
+        sortDirectionBox.SelectedItem = SettingHelper.Get("VideoSortDescending", false, domain)
+            ? "Descending" : "Ascending";
+        layout.Children.Add(sortDirectionBox);
+
         layout.Children.Add(new TextBlock
         {
             Text = "Changes take effect on the next video preview.",
@@ -647,6 +618,9 @@ public partial class ViewerPanel : UserControl, IDisposable, INotifyPropertyChan
 
             SettingHelper.Set("VideoSizePercent", size, domain);
             SettingHelper.Set("StartAtSeconds", seconds, domain);
+            SettingHelper.Set("VideoSortBy", (string)sortBox.SelectedItem, domain);
+            SettingHelper.Set("VideoSortDescending",
+                (string)sortDirectionBox.SelectedItem == "Descending", domain);
             window.DialogResult = true;
         };
         cancel.Click += (_, _) => window.DialogResult = false;
