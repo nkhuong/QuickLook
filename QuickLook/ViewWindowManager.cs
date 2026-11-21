@@ -36,6 +36,7 @@ public class ViewWindowManager : IDisposable
     private string _invokedPath = string.Empty;
     private ViewerWindow _viewerWindow;
     private bool _deleteNextInProgress;
+    private bool _renameSkimInProgress;
 
     internal ViewWindowManager()
     {
@@ -89,10 +90,54 @@ public class ViewWindowManager : IDisposable
     internal void DispatchVideoSkimPlaybackHotkey(PreviewHotkey action)
     {
         if (!IsVideoSkimPreviewForeground())
-            return;
+        {
+            // For images only +/-/0 are meaningful, never video seeking.
+            if (!CanZoomImageSkimPreview() ||
+                (action != PreviewHotkey.SpeedUp && action != PreviewHotkey.SpeedDown &&
+                 action != PreviewHotkey.SpeedReset))
+                return;
+        }
 
         if (_viewerWindow.ContextObject.ViewerContent is IPreviewHotkeyHandler handler)
             handler.HandlePreviewHotkey(action);
+    }
+    // Photos use the existing global hook but are never mixed with video files.
+    // Confirm the ACTUAL preview HWND is foreground (not Explorer / dialog).
+    internal bool IsImageSkimPreviewForeground()
+    {
+        var window = _viewerWindow;
+        if (window == null || !window.IsVisible ||
+            window.Plugin?.GetType().FullName != "QuickLook.Plugin.ImageViewer.Plugin")
+            return false;
+
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        return hwnd != IntPtr.Zero &&
+               hwnd == QuickLook.Common.NativeMethods.User32.GetForegroundWindow();
+    }
+
+    // ImageViewer may use an embedded web panel for SVG or other formats.
+    // Only consume zoom shortcuts when a native ImagePanel can handle them.
+    internal bool CanZoomImageSkimPreview()
+    {
+        return IsImageSkimPreviewForeground() &&
+               _viewerWindow.ContextObject.ViewerContent is IPreviewHotkeyHandler;
+    }
+    internal bool IsPdfSkimPreviewForeground()
+    {
+        var window = _viewerWindow;
+        if (window == null || !window.IsVisible ||
+            window.Plugin?.GetType().FullName != "QuickLook.Plugin.PDFViewer.Plugin")
+            return false;
+
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        return hwnd != IntPtr.Zero &&
+               hwnd == QuickLook.Common.NativeMethods.User32.GetForegroundWindow();
+    }
+
+    internal bool IsSkimMediaPreviewForeground()
+    {
+        return IsVideoSkimPreviewForeground() ||
+               IsImageSkimPreviewForeground() || IsPdfSkimPreviewForeground();
     }
     internal bool IsVideoSkimPreviewForeground()
     {
@@ -107,12 +152,17 @@ public class ViewWindowManager : IDisposable
     }
     public void PreviewAdjacentVideo(int direction)
     {
-        if (!_viewerWindow.IsVisible || direction == 0)
+        if (_renameSkimInProgress || !_viewerWindow.IsVisible || direction == 0)
             return;
 
         try
         {
-            var next = FindAdjacentVideoPath(_invokedPath, Math.Sign(direction));
+            var type = _viewerWindow.Plugin?.GetType().FullName;
+            var next = type == "QuickLook.Plugin.PDFViewer.Plugin"
+                ? FindAdjacentPdfSkimPath(_invokedPath, Math.Sign(direction))
+                : type == "QuickLook.Plugin.ImageViewer.Plugin"
+                    ? FindAdjacentImageSkimPath(_invokedPath, Math.Sign(direction))
+                    : FindAdjacentVideoPath(_invokedPath, Math.Sign(direction));
             if (!string.IsNullOrEmpty(next) && File.Exists(next))
             {
                 InvokePreview(next); // Reuse the current ViewerWindow.
@@ -222,11 +272,353 @@ public class ViewWindowManager : IDisposable
         }
         return null;
     }
+    // Cached photo navigation. Mirrors the ImageViewer known-extension list;
+    // videos are excluded so moving N/P stays within one media type.
+    private readonly System.Collections.Generic.HashSet<string> _imageSkimExtensions =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".apng", ".ari", ".arw", ".avif", ".ani", ".bay", ".bmp",
+            ".cap", ".cr2", ".cr3", ".crw", ".cur", ".clip",
+            ".dcr", ".dcs", ".dds", ".dng", ".drf", ".dcm", ".dicom",
+            ".eip", ".emf", ".erf", ".exr", ".excalidraw", ".fff",
+            ".gfie", ".gfi", ".gif", ".hdr", ".heic", ".heif",
+            ".ico", ".icon", ".icns", ".iiq", ".jfif", ".jp2",
+            ".jpeg", ".jpg", ".jxl", ".j2k", ".jpf", ".jpx", ".jpm", ".jxr",
+            ".k25", ".kdc", ".mdc", ".mef", ".mos", ".mrw", ".mj2", ".miff",
+            ".nef", ".nrw", ".obm", ".orf", ".pbm", ".pcx", ".pef",
+            ".pgm", ".png", ".pnm", ".ppm", ".psb", ".psd", ".ptx", ".pxn",
+            ".qoi", ".r3d", ".raf", ".raw", ".rw2", ".rwl", ".rwz",
+            ".sr2", ".srf", ".srw", ".svg", ".svgz", ".tga", ".tif",
+            ".tiff", ".wdp", ".webp", ".wmf", ".x3f", ".xcf", ".xbm", ".xpm"
+        };
+    private string[] _imageSkimCachedFiles;
+    private string _imageSkimCachedFolder;
+    private string _imageSkimCachedSort;
+    private bool _imageSkimCachedDescending;
+    private DateTime _imageSkimCacheExpiresUtc = DateTime.MinValue;
+
+    private void InvalidateImageSkimFileCache()
+    {
+        _imageSkimCacheExpiresUtc = DateTime.MinValue;
+    }
+
+    private string[] GetSortedImageSkimFiles(string folder)
+    {
+        const string domain = "QuickLook.Plugin.VideoViewer";
+        var sort = SettingHelper.Get("VideoSortBy", "Name", domain);
+        if (sort != "Size" && sort != "Date") sort = "Name";
+        bool desc = SettingHelper.Get("VideoSortDescending", false, domain);
+        if (_imageSkimCachedFiles != null &&
+            string.Equals(folder, _imageSkimCachedFolder, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(sort, _imageSkimCachedSort, StringComparison.Ordinal) &&
+            desc == _imageSkimCachedDescending && DateTime.UtcNow < _imageSkimCacheExpiresUtc)
+            return _imageSkimCachedFiles;
+
+        var items = new DirectoryInfo(folder).EnumerateFiles()
+            .Where(file => _imageSkimExtensions.Contains(file.Extension));
+        System.Collections.Generic.IEnumerable<FileInfo> ordered;
+        switch (sort)
+        {
+            case "Size":
+                ordered = desc
+                    ? items.OrderByDescending(file => file.Length)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.Length)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+            case "Date":
+                ordered = desc
+                    ? items.OrderByDescending(file => file.LastWriteTimeUtc)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.LastWriteTimeUtc)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+            default:
+                ordered = desc
+                    ? items.OrderByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+        }
+
+        var paths = ordered.Select(file => file.FullName).ToArray();
+        _imageSkimCachedFiles = paths;
+        _imageSkimCachedFolder = folder;
+        _imageSkimCachedSort = sort;
+        _imageSkimCachedDescending = desc;
+        _imageSkimCacheExpiresUtc = DateTime.UtcNow.AddSeconds(5);
+        return paths;
+    }
+
+    private string FindAdjacentImageSkimPath(string current, int direction)
+    {
+        if (direction == 0 || string.IsNullOrWhiteSpace(current) || !File.Exists(current) ||
+            !_imageSkimExtensions.Contains(Path.GetExtension(current)))
+            return null;
+
+        var folder = Path.GetDirectoryName(current);
+        for (int pass = 0; pass < 2; pass++)
+        {
+            var files = GetSortedImageSkimFiles(folder);
+            var index = Array.FindIndex(files,
+                file => string.Equals(file, current, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                InvalidateImageSkimFileCache();
+                continue;
+            }
+
+            bool foundMissing = false;
+            for (int neighbor = index + Math.Sign(direction);
+                 neighbor >= 0 && neighbor < files.Length;
+                 neighbor += Math.Sign(direction))
+            {
+                if (File.Exists(files[neighbor]))
+                    return files[neighbor];
+                foundMissing = true;
+            }
+            if (!foundMissing) return null;
+            if (pass == 0) InvalidateImageSkimFileCache();
+        }
+        return null;
+    }
+    // File-level PDF navigation. This never changes the PDF viewer's PAGE controls.
+    // Metadata-only sort: Name, Size or Date Modified + Asc/Desc, cached for 5s.
+    private string[] _pdfSkimCachedFiles;
+    private string _pdfSkimCachedFolder;
+    private string _pdfSkimCachedSort;
+    private bool _pdfSkimCachedDescending;
+    private DateTime _pdfSkimCacheExpiresUtc = DateTime.MinValue;
+
+    private void InvalidatePdfSkimFileCache() => _pdfSkimCacheExpiresUtc = DateTime.MinValue;
+
+    private string[] GetSortedPdfSkimFiles(string folder)
+    {
+        const string domain = "QuickLook.Plugin.VideoViewer";
+        var sort = SettingHelper.Get("VideoSortBy", "Name", domain);
+        if (sort != "Size" && sort != "Date") sort = "Name";
+        bool desc = SettingHelper.Get("VideoSortDescending", false, domain);
+        if (_pdfSkimCachedFiles != null &&
+            string.Equals(folder, _pdfSkimCachedFolder, StringComparison.OrdinalIgnoreCase) &&
+            sort == _pdfSkimCachedSort && desc == _pdfSkimCachedDescending &&
+            DateTime.UtcNow < _pdfSkimCacheExpiresUtc)
+            return _pdfSkimCachedFiles;
+
+        var items = new DirectoryInfo(folder).EnumerateFiles()
+            .Where(file => string.Equals(file.Extension, ".pdf", StringComparison.OrdinalIgnoreCase));
+        System.Collections.Generic.IEnumerable<FileInfo> ordered;
+        switch (sort)
+        {
+            case "Size":
+                ordered = desc
+                    ? items.OrderByDescending(file => file.Length)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.Length)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+            case "Date":
+                ordered = desc
+                    ? items.OrderByDescending(file => file.LastWriteTimeUtc)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.LastWriteTimeUtc)
+                        .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+            default:
+                ordered = desc
+                    ? items.OrderByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                    : items.OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase);
+                break;
+        }
+
+        _pdfSkimCachedFiles = ordered.Select(file => file.FullName).ToArray();
+        _pdfSkimCachedFolder = folder;
+        _pdfSkimCachedSort = sort;
+        _pdfSkimCachedDescending = desc;
+        _pdfSkimCacheExpiresUtc = DateTime.UtcNow.AddSeconds(5);
+        return _pdfSkimCachedFiles;
+    }
+
+    private string FindAdjacentPdfSkimPath(string current, int direction)
+    {
+        if (direction == 0 || string.IsNullOrWhiteSpace(current) || !File.Exists(current) ||
+            !string.Equals(Path.GetExtension(current), ".pdf", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var folder = Path.GetDirectoryName(current);
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            var files = GetSortedPdfSkimFiles(folder);
+            var index = Array.FindIndex(files,
+                file => string.Equals(file, current, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                InvalidatePdfSkimFileCache();
+                continue;
+            }
+            bool missing = false;
+            for (int idx = index + Math.Sign(direction);
+                 idx >= 0 && idx < files.Length;
+                 idx += Math.Sign(direction))
+            {
+                if (File.Exists(files[idx])) return files[idx];
+                missing = true;
+            }
+            if (!missing) return null;
+            if (pass == 0) InvalidatePdfSkimFileCache();
+        }
+        return null;
+    }
     // Switch preview first, then recycle the OLD video after its DirectShow handle
     // has been released. The preview window stays open when a neighbor exists.
+    // File-level F2 rename for QuickLook video, image and PDF previews.
+    // No second confirmation: Enter in the name dialog immediately commits.
+    // The file extension is intentionally immutable.
+    public async void RenameCurrentSkimFile()
+    {
+        if (_renameSkimInProgress || _deleteNextInProgress ||
+            !IsSkimMediaPreviewForeground())
+            return;
+
+        var current = _invokedPath;
+        if (string.IsNullOrWhiteSpace(current) || !File.Exists(current))
+            return;
+        if (current.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            MessageBox.Show(_viewerWindow, "Rename over network shares is disabled.",
+                "QuickLook", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        _renameSkimInProgress = true;
+        bool previewClosed = false;
+        try
+        {
+            var oldName = Path.GetFileNameWithoutExtension(current);
+            var extension = Path.GetExtension(current);
+            var input = new System.Windows.Controls.TextBox
+            {
+                Text = oldName,
+                FontSize = 15,
+                MinWidth = 300,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 7, 0, 10)
+            };
+            var panel = new System.Windows.Controls.StackPanel
+            {
+                Margin = new Thickness(18)
+            };
+            panel.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = "New file name (extension " + extension + " is preserved):",
+                TextWrapping = TextWrapping.Wrap
+            });
+            panel.Children.Add(input);
+            var buttonRow = new System.Windows.Controls.StackPanel
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            var renameButton = new System.Windows.Controls.Button
+            {
+                Content = "Rename",
+                Width = 90,
+                Height = 29,
+                IsDefault = true,
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            var cancelButton = new System.Windows.Controls.Button
+            {
+                Content = "Cancel",
+                Width = 80,
+                Height = 29,
+                IsCancel = true
+            };
+            buttonRow.Children.Add(renameButton);
+            buttonRow.Children.Add(cancelButton);
+            panel.Children.Add(buttonRow);
+
+            var dialog = new Window
+            {
+                Title = "Rename file - " + Path.GetFileName(current),
+                Owner = _viewerWindow,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                ResizeMode = ResizeMode.NoResize,
+                SizeToContent = SizeToContent.Height,
+                Width = 470,
+                ShowInTaskbar = false,
+                Content = panel
+            };
+            renameButton.Click += (_, _) => dialog.DialogResult = true;
+            cancelButton.Click += (_, _) => dialog.DialogResult = false;
+            dialog.Loaded += (_, _) => { input.Focus(); input.SelectAll(); };
+
+            if (dialog.ShowDialog() != true)
+                return;
+
+            var newBase = input.Text.Trim();
+            if (string.IsNullOrWhiteSpace(newBase) || newBase == "." || newBase == ".." ||
+                newBase.EndsWith(".", StringComparison.Ordinal) ||
+                newBase.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                throw new ArgumentException("Invalid file name. Use F2 and enter a valid name.");
+
+            var target = Path.Combine(Path.GetDirectoryName(current), newBase + extension);
+            if (string.Equals(current, target, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (File.Exists(target))
+                throw new IOException("A file with that name already exists: " + Path.GetFileName(target));
+
+            try
+            {
+                await Task.Run(() => File.Move(current, target));
+            }
+            catch (IOException ex) when (IsSkimFileSharingViolation(ex))
+            {
+                // Pdfium/DirectShow/ImageViewer may keep file handles open.
+                ClosePreview();
+                previewClosed = true;
+                for (int attempt = 0; attempt < 10; ++attempt)
+                {
+                    await Task.Delay(180);
+                    try
+                    {
+                        await Task.Run(() => File.Move(current, target));
+                        break;
+                    }
+                    catch (IOException retry) when (IsSkimFileSharingViolation(retry) && attempt < 9)
+                    {
+                        // Give the renderer more time to release the old file.
+                    }
+                }
+            }
+
+            // All media-specific caches must be invalidated after renaming.
+            InvalidateVideoSkimFileCache();
+            InvalidateImageSkimFileCache();
+            InvalidatePdfSkimFileCache();
+            if (File.Exists(target))
+                InvokePreview(target);
+        }
+        catch (Exception ex)
+        {
+            ProcessHelper.WriteLog("VideoSkim: rename failed: " + ex);
+            if (previewClosed && File.Exists(current))
+                InvokePreview(current);
+            MessageBox.Show("Could not rename file:\n" + ex.Message,
+                "QuickLook - Rename", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _renameSkimInProgress = false;
+        }
+    }
+
+    private static bool IsSkimFileSharingViolation(IOException ex)
+    {
+        int code = ex.HResult & 0xFFFF;
+        return code == 32 || code == 33; // Win32 sharing/lock violation.
+    }
     public async void DeleteCurrentVideoAndPreviewNext()
     {
-        if (_deleteNextInProgress || !_viewerWindow.IsVisible)
+        if (_deleteNextInProgress || _renameSkimInProgress || !_viewerWindow.IsVisible)
             return;
 
         var current = _invokedPath;
@@ -244,8 +636,12 @@ public class ViewWindowManager : IDisposable
         _deleteNextInProgress = true;
         try
         {
-            var next = FindAdjacentVideoPath(current, 1)
-                       ?? FindAdjacentVideoPath(current, -1);
+            var type = _viewerWindow.Plugin?.GetType().FullName;
+            var next = type == "QuickLook.Plugin.PDFViewer.Plugin"
+                ? (FindAdjacentPdfSkimPath(current, 1) ?? FindAdjacentPdfSkimPath(current, -1))
+                : type == "QuickLook.Plugin.ImageViewer.Plugin"
+                    ? (FindAdjacentImageSkimPath(current, 1) ?? FindAdjacentImageSkimPath(current, -1))
+                    : (FindAdjacentVideoPath(current, 1) ?? FindAdjacentVideoPath(current, -1));
 
             if (!string.IsNullOrEmpty(next) && File.Exists(next))
             {
@@ -272,6 +668,8 @@ public class ViewWindowManager : IDisposable
                     if (File.Exists(current))
                         throw new IOException("The old video still exists after the recycle operation.");
                     InvalidateVideoSkimFileCache();
+                    InvalidateImageSkimFileCache();
+                    InvalidatePdfSkimFileCache();
                     return;
                 }
                 catch (IOException) when (attempt < 11)

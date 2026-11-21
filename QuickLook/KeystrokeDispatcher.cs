@@ -147,13 +147,18 @@ internal class KeystrokeDispatcher : IDisposable
     // VideoSkim hotkeys must survive QuickLook's UnloadPlugin/Keyboard.ClearFocus.
     // GlobalKeyboardHook is already installed by QuickLook, so this does NOT
     // install a second global hook. No modifiers are accepted.
+    // VideoSkimPdfV11: keyboard layout assumption: US < = Shift+Comma, > = Shift+Period.
+    // Reuses QuickLook's existing keyboard hook (no second global hook).
+    // VideoSkimCommaPeriodRenameV12: plain , and . for previous/next, F2 to rename.
+    // This hook only acts when QuickLook's video/photo/PDF preview is foreground.
     private bool TryHandleVideoSkimGlobalKey(KeyEventArgs e, bool isKeyDown)
     {
         var key = e.KeyCode;
-        if (key != Keys.N && key != Keys.P && key != Keys.Delete)
+        if (key != Keys.Oemcomma && key != Keys.OemPeriod &&
+            key != Keys.F2 && key != Keys.Delete)
             return false;
 
-        // Swallow KeyUp only if this same key's KeyDown was handled here.
+        // Release the held key based on the physical key, regardless of modifiers.
         if (!isKeyDown)
         {
             if (_videoSkimHeldKeys.Remove(key))
@@ -169,29 +174,29 @@ internal class KeystrokeDispatcher : IDisposable
 
         try
         {
-            // Only the foreground video PREVIEW HWND, not other QuickLook
-            // dialogs, Explorer, or any other application.
             var manager = ViewWindowManager.GetInstance();
-            if (!manager.IsVideoSkimPreviewForeground())
+            if (!manager.IsSkimMediaPreviewForeground())
                 return false;
 
-            e.Handled = true; // Prevent the WPF panel from handling it twice.
+            e.Handled = true;
             if (!_videoSkimHeldKeys.Add(key))
-                return true; // Ignore keyboard auto-repeat (important for Delete).
+                return true; // One action per physical key press.
 
             System.Windows.Application.Current.Dispatcher.BeginInvoke(new Action(() =>
             {
-                // Foreground might have changed while this work was queued.
-                if (!manager.IsVideoSkimPreviewForeground())
+                if (!manager.IsSkimMediaPreviewForeground())
                     return;
 
                 switch (key)
                 {
-                    case Keys.N:
+                    case Keys.Oemcomma:
+                        manager.PreviewAdjacentVideo(-1);
+                        break;
+                    case Keys.OemPeriod:
                         manager.PreviewAdjacentVideo(1);
                         break;
-                    case Keys.P:
-                        manager.PreviewAdjacentVideo(-1);
+                    case Keys.F2:
+                        manager.RenameCurrentSkimFile();
                         break;
                     case Keys.Delete:
                         manager.DeleteCurrentVideoAndPreviewNext();
@@ -202,13 +207,10 @@ internal class KeystrokeDispatcher : IDisposable
         }
         catch (Exception ex)
         {
-            Debug.WriteLine("VideoSkim global hotkey failed: " + ex);
+            Debug.WriteLine("VideoSkim navigation/rename shortcut failed: " + ex);
             return false;
         }
     }
-    // Playback commands use the SAME low-level hook as VideoSkim N/P/Delete.
-    // They run only while the actual preview HWND is foreground (not Explorer,
-    // Settings dialogs or other QuickLook windows). No extra hook is installed.
     private bool TryHandleVideoSkimPlaybackKey(KeyEventArgs e, bool isKeyDown)
     {
         var key = e.KeyCode;
@@ -264,7 +266,11 @@ internal class KeystrokeDispatcher : IDisposable
         try
         {
             var manager = ViewWindowManager.GetInstance();
-            if (!manager.IsVideoSkimPreviewForeground())
+            bool imageZoomShortcut = action.Value == PreviewHotkey.SpeedUp ||
+                                     action.Value == PreviewHotkey.SpeedDown ||
+                                     action.Value == PreviewHotkey.SpeedReset;
+            if (!manager.IsVideoSkimPreviewForeground() &&
+                !(imageZoomShortcut && manager.CanZoomImageSkimPreview()))
                 return false;
 
             e.Handled = true; // Do not deliver a duplicate WPF PreviewKeyDown.
@@ -276,7 +282,7 @@ internal class KeystrokeDispatcher : IDisposable
             // dispatcher. ContextIdle lets that load finish before handling a key.
             System.Windows.Application.Current.Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (manager.IsVideoSkimPreviewForeground())
+                if (manager.IsVideoSkimPreviewForeground() || (imageZoomShortcut && manager.CanZoomImageSkimPreview()))
                     manager.DispatchVideoSkimPlaybackHotkey(capturedAction);
             }), System.Windows.Threading.DispatcherPriority.Background);
             return true;

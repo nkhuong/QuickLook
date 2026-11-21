@@ -1,4 +1,4 @@
-﻿// Copyright © 2017-2026 QL-Win Contributors
+// Copyright © 2017-2026 QL-Win Contributors
 //
 // This file is part of QuickLook program.
 //
@@ -41,7 +41,7 @@ using System.Windows.Threading;
 
 namespace QuickLook.Plugin.ImageViewer;
 
-public partial class ImagePanel : UserControl, INotifyPropertyChanged, IDisposable
+public partial class ImagePanel : UserControl, INotifyPropertyChanged, IDisposable, IPreviewHotkeyHandler
 {
     private Visibility _backgroundVisibility = Visibility.Visible;
     private ContextObject _contextObject;
@@ -528,6 +528,82 @@ public partial class ImagePanel : UserControl, INotifyPropertyChanged, IDisposab
         viewPanel.ScrollToVerticalOffset(point.Y);
     }
 
+    // Global player shortcuts (only when this native photo panel is foreground).
+    // Video +/- means speed; on photos the same keys zoom the image instead.
+    private bool _photoZoomWindowSizeRecorded;
+    private double _photoZoomBaseFactor;
+    private Size _photoZoomBaseWindowSize;
+
+    // Resize only for keyboard +/-/0. Mouse wheel/touch zoom remains unchanged.
+    public void HandlePreviewHotkey(PreviewHotkey action)
+    {
+        if (viewPanelImage?.Source == null)
+            return;
+
+        var window = Window.GetWindow(this);
+        if (window != null && !_photoZoomWindowSizeRecorded &&
+            window.ActualWidth > 0 && window.ActualHeight > 0)
+        {
+            _photoZoomBaseWindowSize = new Size(window.ActualWidth, window.ActualHeight);
+            _photoZoomBaseFactor = Math.Max(0.001d, ZoomFactor);
+            _photoZoomWindowSizeRecorded = true;
+        }
+
+        switch (action)
+        {
+            case PreviewHotkey.SpeedUp:
+                Zoom(ZoomFactor * 1.2d);
+                ResizeWindowForKeyboardZoom(window, false);
+                break;
+            case PreviewHotkey.SpeedDown:
+                Zoom(ZoomFactor / 1.2d);
+                ResizeWindowForKeyboardZoom(window, false);
+                break;
+            case PreviewHotkey.SpeedReset:
+                ResizeWindowForKeyboardZoom(window, true);
+                // After window dimensions change, the fit factor needs fresh layout.
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    DoZoomToFit();
+                    _photoZoomWindowSizeRecorded = false; // Start a fresh zoom session next time.
+                }), DispatcherPriority.Loaded);
+                break;
+        }
+    }
+
+    private void ResizeWindowForKeyboardZoom(Window window, bool reset)
+    {
+        if (!_photoZoomWindowSizeRecorded || window == null ||
+            window.WindowState != WindowState.Normal)
+            return; // Never resize maximized/fullscreen windows.
+
+        var monitor = QuickLook.Common.Helpers.WindowHelper.GetDesktopRectFromWindowInPixel(window);
+        var dpi = VisualTreeHelper.GetDpi(window);
+        double dx = Math.Max(1d, dpi.DpiScaleX);
+        double dy = Math.Max(1d, dpi.DpiScaleY);
+        double monitorLeft = monitor.Left / dx;
+        double monitorTop = monitor.Top / dy;
+        double monitorRight = monitor.Right / dx;
+        double monitorBottom = monitor.Bottom / dy;
+        double minWidth = Math.Max(280d, window.MinWidth);
+        double minHeight = Math.Max(200d, window.MinHeight);
+        double maxWidth = Math.Max(minWidth, 0.90d * monitor.Width / dx);
+        double maxHeight = Math.Max(minHeight, 0.90d * monitor.Height / dy);
+        double zoomRatio = reset ? 1d : Math.Max(0.01d, ZoomFactor / _photoZoomBaseFactor);
+        double width = Math.Min(maxWidth,
+            Math.Max(minWidth, _photoZoomBaseWindowSize.Width * zoomRatio));
+        double height = Math.Min(maxHeight,
+            Math.Max(minHeight, _photoZoomBaseWindowSize.Height * zoomRatio));
+
+        double centerX = window.Left + window.ActualWidth / 2d;
+        double centerY = window.Top + window.ActualHeight / 2d;
+        window.Width = width;
+        window.Height = height;
+        window.Left = Math.Max(monitorLeft,
+            Math.Min(centerX - width / 2d, monitorRight - width));
+        window.Top = Math.Max(monitorTop,
+            Math.Min(centerY - height / 2d, monitorBottom - height));
+    }
     public void DoZoomToFit()
     {
         UpdateZoomToFitFactor();

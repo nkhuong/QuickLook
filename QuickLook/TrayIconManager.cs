@@ -70,7 +70,11 @@ internal partial class TrayIconManager : IDisposable
                     Header = TranslationHelper.Get("Icon_OpenDataFolder"),
                     Command = new RelayCommand(() => Process.Start("explorer.exe", SettingHelper.LocalDataPath)),
                 },
-                _itemAutorun = new TrayMenuItem()
+                new TrayMenuItem()
+                {
+                    Header = "Keyboard Shortcuts / PhÃ­m táº¯t",
+                    Command = new RelayCommand(ShowVideoSkimShortcutHelp),
+                },                _itemAutorun = new TrayMenuItem()
                 {
                     Header = TranslationHelper.Get("Icon_RunAtStartup"),
                     Command = new RelayCommand(() =>
@@ -112,6 +116,84 @@ internal partial class TrayIconManager : IDisposable
         };
     }
 
+    private System.Windows.Window _videoSkimShortcutHelpWindow;
+
+    private void ShowVideoSkimShortcutHelp()
+    {
+        var dispatcher = System.Windows.Application.Current.Dispatcher;
+        if (!dispatcher.CheckAccess())
+        {
+            dispatcher.BeginInvoke(new Action(ShowVideoSkimShortcutHelp));
+            return;
+        }
+        if (_videoSkimShortcutHelpWindow != null)
+        {
+            if (_videoSkimShortcutHelpWindow.WindowState == System.Windows.WindowState.Minimized)
+                _videoSkimShortcutHelpWindow.WindowState = System.Windows.WindowState.Normal;
+            _videoSkimShortcutHelpWindow.Activate();
+            return;
+        }
+
+        const string guide = @"QUICKLOOK VIDEOSKIM - KEYBOARD SHORTCUTS
+
+COMMON: VIDEO / PHOTO / PDF
+  Space                   Open / close QuickLook preview (from Explorer)
+  ,                       Previous file (no Shift)
+  .                       Next file (no Shift)
+  Delete                  Move current file to Recycle Bin, open next
+  F2                      Rename current file (Enter to save)
+
+VIDEO
+  Shift + Left / Right    Seek -10 / +10 seconds
+  Ctrl  + Left / Right    Seek -30 / +30 seconds
+  + / Numpad +            Faster playback
+  - / Numpad -            Slower playback
+  0 / Numpad 0            Reset speed to 1x
+  Home / End              Seek to start / near end
+
+PHOTO
+  + / Numpad +            Zoom in and enlarge preview window
+  - / Numpad -            Zoom out and shrink preview window
+  0 / Numpad 0            Reset photo size and fit to window
+
+PDF
+  , / .                   Previous / next PDF FILE
+  Use PDF toolbar         Move between PAGES in the current PDF
+
+NOTES
+  Navigation order: Name, Size, or Date Modified (Asc / Desc).
+  Set order from the VideoViewer Settings (gear icon).
+  , and . are plain comma/period keys; no Shift needed.
+  Delete skips confirmation; the file goes to Recycle Bin.
+  Shortcuts work only when the QuickLook preview window is foreground.";
+        var content = new System.Windows.Controls.TextBox
+        {
+            Text = guide,
+            IsReadOnly = true,
+            TextWrapping = System.Windows.TextWrapping.Wrap,
+            VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Disabled,
+            FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+            FontSize = 13,
+            Margin = new System.Windows.Thickness(12),
+            Padding = new System.Windows.Thickness(10),
+        };
+        var window = new System.Windows.Window
+        {
+            Title = "QuickLook VideoSkim - Keyboard Shortcuts",
+            Width = 620,
+            Height = 590,
+            MinWidth = 450,
+            MinHeight = 350,
+            WindowStartupLocation = System.Windows.WindowStartupLocation.CenterScreen,
+            Content = content,
+            ShowInTaskbar = true,
+        };
+        window.Closed += (_, _) => _videoSkimShortcutHelpWindow = null;
+        _videoSkimShortcutHelpWindow = window;
+        window.Show();
+        window.Activate();
+    }
     public void Dispose()
     {
         _icon.IsVisible = false;
